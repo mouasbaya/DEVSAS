@@ -1,0 +1,194 @@
+/*Libname permet de spécifier un emplacement pour les données sur l'ordibateur ou le serveur  - sauvegarde ou stockage des données*/
+/*Aprés la déconnexion de SAS on ne perd pas les données créees dans une librairie car elles sont sauvegardées*/ 
+libname ODS "/home/u59717935/exercice/Tables/ODS";
+libname DWH "/home/u59717935/exercice/Tables/DWH";
+libname DTM "/home/u59717935/exercice/Tables/DTM";
+
+
+/***************************************************************/
+/**********PROGRAMME l'ODS - TABLES DANS LIBRAIRIE ODS**********/
+/***************************************************************/
+Data Client_FEV;
+	Infile "/home/u59717935/exercice/Fichiers/Commerce/Fichier_client_28022022.txt" dsd missover;
+	input  nom $7. prenom $6. dat_nais $8. fruit $6. id $3. Qte 1. adresse $27. dat_per ;	
+	
+run;
+Data ods.Produit;
+	infile "/home/u59717935/exercice/Fichiers/Commerce/Fichier_produit_28022022.txt";
+	input dat_per 5. fruit $6. Id $3. prix ;
+	format dat_per date9.;
+
+run;
+
+/** Nettoyage et mise en forme des données importées ***/
+/** utiliser output pour creer les tables en sortie  ***/
+data ods.Client(drop=dat_rejet cause_rejet) ODS.rejet(keep=nom prenom fruit id qte 
+				dat_rejet cause_rejet);
+  set Client_FEV;
+    format dat_per date9.;
+	
+	If fruit eq "" and qte=. then qte=0;
+	else if fruit ne "" and qte=. then qte=1;
+	else qte=qte;
+	
+	if qte=0 then do;
+		dat_rejet=put(today(),date9.);
+		cause_rejet="Fruit ou quantité non renseigné";
+		output ods.rejet;
+	end;
+	else do;
+		output ods.client;
+	end;	
+run;
+
+/***************************************************************/
+/********PROGRAMME DATAWERE - TABLES DANS LIBRAIRIE DWH*********/
+/***************************************************************/
+
+/*CREATION DE NOUVELLES COLONNES OU VARIABLES*/
+/*on peut créer des nouvelles variables en utilisant les variable de la table qui sont dans la table source*/
+/*la création s'éfféctue soit :
+		- directement, s
+		- oit par condition, 
+		- soit en utilisant des fonctions SAS
+*/
+/*quelques fonction :
+		- Fonction sur variable de type caractére: substr, scan, catx, left, ...
+		- Fonction sur des variables numériques : sum, min, max, ..;
+		- Fonction qu'on applique sur des variables de type Date : year, month, intx, ...
+*/
+
+
+/*utilisation des fonctions sur variables caractéres*/
+data client(drop= nom prenom adresse );
+	set ODS.client ;
+	;
+	client =catx("",nom,prenom);
+	cdp=scan(adresse, 5,"");
+	
+	format Region $14.;
+	format depart $14.;
+	
+	
+	if substr(cdp,1, 2) =27 then depart="Eure";
+	else if substr(cdp,1, 2) =59 then depart="Nord";
+	else if substr(cdp,1, 2) =57 then depart="Loraine";
+	else if substr(cdp,1, 2) =95 then depart="Pontoise";
+	else if substr(cdp,1, 2) =76 then depart="Seine-Maritime";
+	else if substr(cdp,1, 2) =75 then depart="Hauts de Seine";
+	else depart="Autre depart";	
+	
+	if depart in("Eure","Seine-Maritime") then Region="Normandie";
+	else if depart in("Pontoise","Hauts de Seine") then Region="Ile-De-France";
+	else if depart ="Nord" then Region="Nord";
+	else if depart ="Loraine" then Region="Grand Est";
+	else Region="Sud";
+run;
+
+/*utilisation des fonctions pour calcul ou transformer des variable de type Date*/
+data client1(drop=dat_nais age1); 
+	set client;
+	
+	format aujourd ddmmyy10. ;
+	dat_nais=input(dat_nais,ddmmyy8.);
+	aujourd=today();  /*today() retourne la date d'aujourd'hui*/
+	age1=yrdif(dat_nais,aujourd,'actual'); /*calcul age approximatif*/
+	age=INTCK('year',dat_nais,aujourd); /*calcul age exact*/	
+run;
+
+
+/*création de variable par condition 
+		- utilisation de if  ... then do; else do ...end;
+		- utlilisation d'autres  fonctions DATE
+***/
+data produit;
+	set ods.produit;
+	
+	dat_perim1=intnx("month",dat_per, 2);
+	annee_prod=year(dat_per);
+	mois_prod=month(dat_per);
+    
+    if fruit="Banane" then Origine_Prod="Amerique" ;
+	else if fruit ="Cerise" then Origine_Prod="Asie";
+	else if fruit in ("Melon","Raisin","Figue") then Origine_Prod="Afrique";
+	else Origine_Prod="Europe";
+	
+	if Origine_Prod="Asie" or Origine_Prod="Afrique" then do;
+		prix=prix + 1;
+		dat_perim=intnx("day",dat_perim1, -5);
+    end;
+    else do;
+       prix=prix;
+       dat_perim=dat_perim1;
+    end;
+    
+    format dat_perim ddmmyy10. dat_perim1 date9.;
+run;
+
+/***tri des tables obligatoire avant chaque jointure avec etape DATA - Merge ***/
+proc sort data=client out=client1 ;
+	by Fruit descending Id dat_per;
+proc sort data=produit out=produit1 ;
+	by Fruit descending Id dat_per;
+run;
+
+/* JOINTURE AVEC MERGE - TEST POUR CREER DEUX TABLE EN SORTIE */
+/* LE RESULTAT DE LA JOINTURE AVEC UN "IF X" EST IDENTIQUE A CELUI DE PROC SQL "LEFT JOIN"*/
+Data DWH.Achat (keep=_all_) ;
+	merge Client1(in=x)  produit1(in=y);
+		by fruit descending Id dat_per;
+		if x and y  ;	
+		
+		drop dat_perim1;
+run;
+
+
+/***************************************************************/
+/********PROGRAMME DATAMART - TABLES DANS LIBRAIRIE DTM*********/
+/***************************************************************/
+data achat; 
+	set dwh.achat;
+	
+	achat=qte*prix;
+		
+	if achat>40 then remise=0.2*achat;
+	else if achat<20 then remise=0.1*achat;
+	else remise=0.15*achat;	
+run;
+
+/*PROC SQL - SELECTION DE COLONNE ET UTILISATION DE FILTRES AVEC WHERE*/
+proc sql;
+create table DTM.achat1 as select Client, Region, fruit, id, Origine_Prod, dat_per, prix, Qte, Achat, Remise
+FROM achat order by Region, Fruit, Id; 
+quit; 
+
+
+
+/*****************************************************************************/
+/********PROGRAMME DE CONTROLE DE DONNEES - TABLES DANS LIBRAIRIE DTM*********/
+/*****************************************************************************/
+
+/***Importer les données objectif des ventes***/
+Proc import datafile="/home/u59717935/exercice/Fichiers/Donnees_Estimees.xlsx" 
+		out=Objectif_V
+		dbms=xlsx replace;
+run;
+
+proc sort data=Objectif_V out=DTM.Objectif_V;
+by Region Produit;
+run;
+
+
+/*JOINTURE AVEC PROC SQL*/
+PROC SQL ;
+create table achat_Agrege AS SELECT Region, Produit, Achat, Remise, Sum(Achat) as Achat_Reel from achat1(rename=(Fruit=produit)) 
+group by Region, produit
+ ;
+quit;
+
+proc sql; 
+Create table Vte_Reg_Prdt as select distinct Region, Produit, Achat_Reel, Remise
+from achat_Agrege;
+quit; 
+
+
